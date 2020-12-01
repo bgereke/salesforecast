@@ -1,0 +1,14 @@
+Package: salesforecast
+Title: Forecast Weekly Sales for Each Store and Department
+Version: 0.0.0.9000
+Authors@R: 
+    person(given = "Brian",
+           family = "Gereke",
+           role = c("aut", "cre"),
+           email = "bgereke89@gmail.com")
+Description: Performs exploratory analysis of weekly sales with holidays and missing data. Performs cross-validation analysis to compare basline forecasting models to Facebook Prophet. Provides interactive Shiny App to explore and visualize forecasts.
+License: `use_mit_license()`
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.1.1

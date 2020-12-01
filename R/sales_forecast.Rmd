@@ -1,0 +1,557 @@
+---
+title: "Sales Forecast Challenge"
+output: html_notebook
+---
+
+### Challenge instructions: 
+Using the following data set (train.csv), create a script which forecasts each primary key: (store and dept) and then scores the accuracy of the models using the last 3 dates as a holdout. Please pay attention to best practices in scripting and be prepared to explain why you took the approach you did.  Be transparent about the model metrics you paid attention to and explain the rationale behind the model you chose. Furthermore prepare to provide business rationale to the model you selected. The exercise is to forecast business sales.  Think about what type of model(s) would be helpful for forecasting and performing inference on sales? 
+
+```{r}
+suppressMessages({
+  library(tidyverse, quietly = TRUE, warn.conflicts = FALSE)
+  library(forecast)
+  library(prophet)
+  library(qgam)
+  library(doParallel)
+  source('/home/brian/R/salesforecast/R/helpers.R')
+  })
+```
+
+### Read, preprocess and split data:
+```{r}
+processed <- read.csv(file = '/home/brian/R/salesforecast/data/train (1).csv') %>%
+  preprocess %>%
+  train_test_split(weeks = 3)
+
+train <- processed$train
+test <- processed$test
+rm(processed)
+```
+Since the instructions are to provide a forecast for each primary key (i.e., Store-Dept combination), it makes sense to create a primary key variable to identify each unique time series. I also created variables for day-of-month, day-of-week, week-of-year, month, year, and each separate holiday as they may be useful later on. Lastly, I reserved the last three days of data from the train set as  holdout so it doesn't bias any of the learning between now and test time. 
+
+### View data:
+```{r}
+head(train)
+```
+The data is reported on Fridays and there are at least tens of thousands of sales each week. Also, there is a holiday variable which probably has some kind of effect on sales. 
+
+### Visualize weekly sales distribution:
+```{r}
+ggplot(train, aes(x=Weekly_Sales)) + 
+  geom_histogram(aes(y=..density..),    
+                 binwidth=10000,
+                 colour="black", fill="white") +
+  geom_density(alpha=.2, fill="#FF6666")
+```
+As might be expected, sales are strictly positive and skewed with a long tail. Depending on the forecasting model, we may need to transform these values in some way.
+
+### Visualize sales over time:
+```{r}
+ggplot(data = train, 
+       aes(x = Date, 
+           y = Weekly_Sales, 
+           group = Primary_Key, 
+           color = Primary_Key)
+       ) + 
+  geom_vline(xintercept = unique(train$Date[train$IsHoliday]), 
+             color = 'gray') +
+  geom_line(size = 0.2, alpha = 1/3) +
+  xlab('date') + 
+  ylab('weekly sales') +
+  theme(panel.border = element_rect(color="black", fill=NA, size=0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        legend.position = 'None'
+        )
+```
+We can tell that at least some of the series show signs of monthly seasonality. The vertical lines mark holidays and some spikes in sales can be seen around Thanksgiving (Black Friday) and before Christmas. There also appear to be weeks with zero sales which could produce issues with forecasting performance evalutaion metrics such as MAPE which produce extreme values when observations are equal to zeros (e.g., due to divide by zero) There are `r length(unique(train$Primary_Key))` separate series which is a bit much to throw into a single plot and the skewed distribution makes the patterns even harder to discern. Let's try applying a Box-Cox transformation to see if it helps at all.
+```{r}
+ggplot(data = train, 
+       aes(x = Date, 
+           y = Weekly_Sales_boxcox, 
+           group = Primary_Key, 
+           color = Primary_Key)
+       ) + 
+  geom_vline(xintercept = unique(train$Date[train$IsHoliday]), 
+             color = 'gray') +
+  geom_hline(yintercept = -3.3, linetype = 'dotted') +
+  geom_line(size = 0.2, alpha = 1/3) +
+  xlab('date') + 
+  ylab('weekly sales') +
+  theme(panel.border = element_rect(color="black", fill=NA, size=0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        legend.position = 'None'
+        )
+```
+It's still messy, but we can now tell there are some negative sales in the data (w/lambda = 0.3, anything less than -3.3 is negative in the original scale). This has implications for forecast performance metrics like MAPE which can't be computed on small/negative observations. We can break things down further by store and/or department to get a sense of how sales vary across these factors.
+
+### Sales over time by store
+```{r}
+ggplot(data = train, 
+       aes(x = Date, 
+           y = Weekly_Sales_boxcox, 
+           group = Primary_Key, 
+           color = Dept)
+       ) + 
+  geom_vline(xintercept = unique(train$Date[train$IsHoliday]), 
+             color = 'gray') +
+  geom_line(size = 0.2) +
+  facet_wrap(~Store, 
+             nrow = 5, 
+             labeller = label_both) +
+  xlab('date') + 
+  ylab('bc-transformed weekly sales') +
+  theme(aspect.ratio = 1,
+        panel.spacing.x = unit(0.5,"lines"),
+        panel.spacing.y = unit(0.5,"lines"),
+        panel.border = element_rect(color="black", fill=NA, size=0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_rect(color="black", fill="white"),
+        strip.text.x = element_text(size = 7),
+        legend.position = 'None'
+        )
+```
+Here we can see there's a mixture of sales patterns, and vertical offsets, across departments within each store. Some stores appear to lack the big "spiky" yearly seasonal pattern; although, this could be by chance. The dispersion of mean sells across departments apears to be somewhat similar from store to store.
+
+### Sales over time by department
+```{r}
+ggplot(data = train, 
+       aes(x = Date, 
+           y = Weekly_Sales_boxcox, 
+           group = Primary_Key, 
+           color = Store)
+       ) + 
+  geom_vline(xintercept = unique(train$Date[train$IsHoliday]), 
+             color = 'gray') +
+  geom_line(size = 0.2) +
+  facet_wrap(~Dept, 
+             nrow = 6, 
+             labeller = label_both) +
+  xlab('date') + 
+  ylab('bc-transformed weekly sales') +
+  theme(aspect.ratio = 1,
+        panel.spacing.x = unit(0.5,"lines"),
+        panel.spacing.y = unit(0.5,"lines"),
+        panel.border = element_rect(color="black", fill=NA, size=0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        strip.background = element_rect(color="black", fill="white"),
+        strip.text.x = element_text(size = 7),
+        legend.position = 'None'
+        )
+```
+Here we can see that the sales pattern across stores within a department are pretty similar. For example, departments 87-92 are all pretty flat with some monthly seasonality, and 18 has a strong yearly seasonality. We can also see that the dispersion of mean sales across stores within each department varies across departments (i.e., some departments are more disperse than others; e.g., 37 vs 91). This suggests sales series could potentially be grouped by department to reduce forecast variance. There may also be "groups" that are defined across both stores and departments which could potentially be discovered in an unsupervise manner via clustering. We can also see that some departments-store pairings have either some missing data or are completely missing (e.g., 39, 43, 65, 77, 78, etc.). The series with lots of missing data may need to be treated differently.
+
+### Missing data
+`r length(unique(train$Store))*length(unique(train$Dept)) - length(unique(train$Primary_Key))` of `r length(unique(train$Store))*length(unique(train$Dept))` possible pairings are completely missing and we don't really need to worry about these cases. Those with partially missing data are of more concern. How we address these cases depends on how much data is missing from each and whether the data is missing at random (i.e., not explained by holidays, etc.).
+```{r}
+dates_per_key <- length(unique(train$Date))
+missing_by_key <- train %>%
+  group_by(Primary_Key) %>%
+  summarize(num_missing = (dates_per_key - n())/dates_per_key*100,
+            .groups = 'drop') %>% 
+  collect
+
+ggplot(data = missing_by_key, aes(x = num_missing)) + 
+  geom_histogram(binwidth = 2) +
+  xlab('% missing') + ylab('# keys') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+It looks like most keys (i.e., store-department pairs) are pretty good at regularly reporting data, but a portion are very bad. We should check to see if these keys come from a particular store or department.
+
+## Missing data by store
+```{r}
+dates_per_key <- length(unique(train$Date))
+num_dept <- length(unique(train$Dept))
+missing_by_store <- train %>% 
+  group_by(Store, ) %>% 
+  summarize(num_missing = (dates_per_key*num_dept - n())/(dates_per_key*num_dept)*100,
+            .groups = 'drop') %>% 
+  arrange(desc(num_missing)) %>% collect
+
+ggplot(data = missing_by_store, aes(x = reorder(Store, -num_missing), y = num_missing)) + 
+  geom_bar(stat = "identity") +
+  xlab('store') + ylab('% missing') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+```
+There are some stores (i.e., the leftmost 8 above) report data less reliably; however, all stores have at least some department that fails to report some data. To determine if any of the stores are especially bad at reporting data, we could perform a permutation test by randomly shuffling store id's across keys. This would let us know which stores we should press for data.
+
+## Missing data by department
+```{r}
+dates_per_key <- length(unique(train$Date))
+num_store <- length(unique(train$Store))
+missing_by_dept <- train %>% 
+  group_by(Dept) %>% 
+  summarize(num_missing = (dates_per_key*num_store - n())/(dates_per_key*num_store)*100,
+            .groups = 'drop') %>% 
+  arrange(desc(num_missing)) %>% collect
+
+ggplot(data = missing_by_dept, aes(x = reorder(Dept, -num_missing), y = num_missing)) + 
+  geom_bar(stat = "identity") +
+  xlab('department') + ylab('% missing') +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) 
+```
+Unlike the "missing-by-store" from the previous plot, this plot shows that there is a set of departments (i.e., the rightmost) that is very good about reporting data across all stores. Conversely, there are some departments (i.e., the leftmost) that hardly ever report data at any store. This is in agreement with the previous plot of "sales over time by department" and further suggests sales trends are highly dependent on department.    
+
+## Missing data by time
+```{r}
+keys_per_week <- length(unique(train$Primary_Key))
+
+missing_by_dept <- train %>% 
+  group_by(Date) %>% 
+  summarize(num_missing = (keys_per_week - n())/(keys_per_week)*100,
+            .groups = 'drop') %>% 
+  collect
+
+ggplot(data = missing_by_dept, 
+       aes(
+         x = Date, 
+         y = num_missing)
+       ) + 
+  geom_vline(xintercept = unique(train$Date[train$IsHoliday]), 
+             color = 'gray') +
+  geom_line() +
+  xlab('date') + ylab('% missing')
+```
+It looks like stores may be better about reporting data between Thanksgiving and Christmas, and might get lazier after the New Year and during the Summer months, but it's hard to say with confidence from this plot alone. We can get a rough sense of missing values are distributed within the series by looking at the distribution of difference between neighboring time points (i.e., distribution of delta_t).
+
+### Distribution of missing gaps in data
+```{r}
+delta_t <- data.frame('diff' = as.numeric(diff(train$Date))/7) %>%
+  filter(!is.na(diff) & diff > 0)
+
+ggplot(data = delta_t, aes(x = diff)) + 
+  geom_histogram(binwidth = 1) +
+  xlab('gap size (weeks)') + ylab('count') + xlim(2, 100) +ylim(0, 1000)
+```
+The vast majority of neighboring observations are 7 days apart, so I set xlim to start at 8 in order to better visualize the remaining instances. As we can see, there are gaps of varying lengths in the data. This inroduces challenges for forecasting approaches that require complete, equally spaced data, and simple solutions (e.g., interpolation) are not likely to fair well.
+
+### Baseline forecasts
+As many of the series have lots of missing data, it is good to start with simple baseline forecasts that don't require complete data. Mean, drift, naïve, and seasonal naïve models are good candidates here. Only mean and naïve models work with series having only one observation, as the drift model requires at least two observations and the seasonal naïve model requires an observation from the same week in one of the previous years. 
+```{r}
+# prepare data
+key <- '1.1'
+key_df <- train %>%
+  get_key_df(key = key) %>%
+  select(Date, Weekly_Sales)
+key_ts <- ts(key_df$Weekly_Sales, 
+             freq = 52, 
+             start = lubridate::year(min(key_df$Date)) + lubridate::yday(min(key_df$Date))/365.25)
+
+# run and plot forecasts
+n <- sum(!is.na(key_ts))
+if (n == 0){
+  #nothing works without any data
+  break
+} else if (n == 1) {
+  #only mean or naive work and both identical
+  autoplot(key_ts) +
+  autolayer(meanf(key_ts, h = 3), series="Mean", PI=FALSE) +
+  autolayer(naive(key_ts, h = 3), series="Naïve", PI=FALSE) +
+  xlab("date") + ylab("weekly sales") +
+  guides(colour=guide_legend(title="Forecast"))
+} else if (n > 1 & n < length(key_ts)) {
+  #only mean, naive, and drift work
+  autoplot(key_ts) +
+  autolayer(meanf(key_ts, h = 3), series="Mean", PI=FALSE) +
+  autolayer(naive(key_ts, h = 3), series="Naïve", PI=FALSE) +
+  autolayer(rwf(key_ts, drift=TRUE, h=3), series="Drift", PI=FALSE) +
+  xlab("date") + ylab("weekly sales") +
+  guides(colour=guide_legend(title="Forecast"))
+} else {
+  #all work
+  autoplot(key_ts) +
+  autolayer(meanf(key_ts, h = 3), series="Mean", PI=FALSE) +
+  autolayer(naive(key_ts, h = 3), series="Naïve", PI=FALSE) +
+  autolayer(snaive(key_ts, h = 3), series="Seasonal naïve", PI=FALSE) +
+  autolayer(rwf(key_ts, drift = TRUE, h = 3), series="Drift", PI=FALSE) +
+  xlab("date") + ylab("weekly sales") +
+  guides(colour=guide_legend(title="Forecast"))
+}
+```
+
+### Prophet forecast
+Facebook's Prophet is a popular GAM-based approach that is able to simultaneously handle trends, complex seasonality, holidays, and some missing data. It is therefore a good candidate for many/most of the series in this dataset.
+```{r}
+#get key df
+key <- '1.1'
+key_df <- train %>%
+  get_key_df(key = key, add_na = FALSE) %>%
+  rename(ds = Date) %>%
+  rename(y = Weekly_Sales) 
+
+#get holidays into prophet format
+holiday_df <- get_holiday_df(train, 
+                             test, 
+                             holidays = c('Christmas',
+                                          'Thanksgiving',
+                                          'LaborDay',
+                                          'SuperBowl',
+                                          'Easter'),
+                             lower_window = -14,
+                             upper_window = 14)
+
+#prepare model
+prophet_model <- prophet(growth = 'linear',
+                         yearly.seasonality = 6,
+                         weekly.seasonality = FALSE,
+                         daily.seasonality = FALSE,
+                         seasonality.mode = "additive",
+                         holidays = holiday_df,
+                         seasonality.prior.scale = 10,
+                         holidays.prior.scale = 10,
+                         changepoint.prior.scale = 0.05,
+                         n.changepoints = 25,
+                         fit = FALSE)
+
+#add monthly seasonality
+prophet_model <- add_seasonality(prophet_model, name='monthly', period=30.5, fourier.order=1)
+
+#fit model
+prophet_model <- fit.prophet(prophet_model, df = key_df)
+
+#get forecast
+future <- make_future_dataframe(prophet_model, 
+                                periods = 3,
+                                freq = 'week')
+forecast <- predict(prophet_model, future)
+
+#plot results
+plot(prophet_model, forecast)
+prophet_plot_components(prophet_model, forecast)
+```
+A nice thing about Prohet is it's ability to autodetect the number of observations and enable/disable the yeary seasonality terms accordingly. It also makes it easy to include leading/lagging terms for each of the holidays. However, handling monthly seasonality is a slightly challenging. Even though it is is able to partially capture monthly seasonality either via yearly seasonality, or by adding a seasonality with a custom period, the monthly period is assumed to be constant in these cases (i.e., ~30.5 days). In our case, it might be nice to have the option of fitting a periodic function to a 'week_of_month' term (e.g., by using cyclical bases as in mgcv). It's also unclear how Prophet handles indentifiability constraints (e.g., all terms should sum to zero across the observations).     
+
+### QGAM Forecast
+```{r}
+#get key df
+key <- '1.1'
+key_df <- train %>%
+  get_key_df(key = key, add_na = FALSE)
+
+#fit model
+qgam_model <- qgam(Weekly_Sales ~ WeekOfEaster + 
+                     OneWeekBeforeEaster + TwoWeeksBeforeEaster + 
+                     TwoWeeksBeforeThanksgiving + OneWeekBeforeThanksgiving +
+                     WeekOfThanksgiving +
+                     s(DaysFromStart, bs = "gp", k=45) + 
+                     s(DayYearNormalized, bs = "ad", k=52) +
+                     s(DayMonthNormalized, bs = "cp"),
+                   qu = 0.5,
+                   control = list(progress = FALSE),
+                   data = key_df)
+
+#get forecast
+new_df <- rbind(train, test) %>%
+  get_key_df(key = '1.1', add_na = FALSE)
+forecast <- predict(object = qgam_model, 
+                    newdata = new_df,
+                    type = "response")
+
+#plot results
+ggplot(data = key_df, aes(x = Date, y = Weekly_Sales)) +
+  geom_point() +
+  geom_line(data = new_df,
+            mapping = aes(x = Date,
+                          y = forecast,
+                          color = '#619CFF')) +
+  xlab('date') + ylab('weekly sales') + 
+  theme(legend.position = 'None')
+plot(qgam_model, pages = 1, scale = 0, scheme = 1, rug = FALSE, all.terms = TRUE)
+```
+
+
+### Cross-validate all models
+```{r}
+# # create nested data frame of full training data by key
+# train_by_key <- nest_by_key(train)
+# 
+# # create holidays argument
+# holiday_df <- get_holiday_df(train, 
+#                              test, 
+#                              holidays = c('Christmas',
+#                                           'Thanksgiving',
+#                                           'LaborDay',
+#                                           'SuperBowl',
+#                                           'Easter'),
+#                              lower_window = -14,
+#                              upper_window = 14)
+# 
+# # create cutoff dates argument
+# num_dates <- 5
+# cutoff_dates <- as.Date(c("2012-09-14")) - 21*seq(0, num_dates - 1)
+# 
+# #cross-validate by key in parallel
+# num_cores <- detectCores() - 1  
+# cl <- makeCluster(num_cores, type="FORK", outfile="")  
+# registerDoParallel(cl)  
+# train_by_key$errors <- foreach(i = 1:nrow(train_by_key)) %dopar% 
+#   ts_cv(data = train_by_key$data[[i]], cutoff_dates = cutoff_dates, holidays = holiday_df)
+# stopCluster(cl)
+# 
+# # gather performance metrics
+# train_by_key$metrics <- foreach(i = 1:nrow(train_by_key)) %do% 
+#     gather_metrics(error_df = train_by_key$errors[[i]])
+
+#start here to avoid retraining above
+if (!exists('train_by_key')){
+  train_by_key <- readRDS('/home/brian/R/salesforecast/data/train_by_key')
+}
+
+# filter out problematic keys and compute summaries for each model, metric and horizon
+metric_df <- train_by_key %>%
+  filter(!is.na(metrics)) %>%
+  mutate(num_obs = map(data, num_obs),
+         min_sales = map(data, min_sales)) %>%
+  filter(num_obs > 50 & min_sales > 1000) %>%
+  select(Primary_Key, metrics) %>%
+  unnest(metrics) %>%
+  group_by(model, horizon, metric) %>%
+  summarise(med_value = median(value[!is.infinite(value)], na.rm = TRUE),
+            mean_value = mean(value[!is.infinite(value)], na.rm = TRUE), 
+            .groups = 'drop')
+metric_df$metric <- factor(metric_df$metric, ordered = TRUE, levels = c('rmse', 'mae', 'mape', 'mase', 'mamse'))
+
+#plot performace metrics
+ggplot(data = metric_df, aes(x = horizon, y = med_value, group = model, color = model)) +
+  geom_point() +
+  facet_wrap(~metric, scales = "free", nrow = 2) +
+  xlab('horizon (weeks)') +
+  theme(aspect.ratio = 1)
+
+```
+Prophet is the best model across all performance metrics and horizons for series with enough training data. For series with less training data, the naive model tends to do better at shorter horizons. MAPE can't be computed reliably on the keys with small minimum sales. MASE can't be computed as reliably on very flat series. Also, MASE should maybe be scaled by the sales diff median instead of the mean when the changes in sales are long-tailed.   
+
+### Error distributions
+```{r}
+# gather errors
+error_df <- train_by_key %>%
+  filter(!is.na(errors)) %>%
+  mutate(num_obs = map(data, num_obs),
+         min_sales = map(data, min_sales)) %>%
+  filter(num_obs > 100,
+         min_sales > 1000) %>%
+  select(Primary_Key, errors) %>%
+  unnest(errors) %>%
+  mutate(percent_error = 100*error/obs,
+         scaled_error = error/mean_diff,
+         med_scaled_error = error/med_diff) 
+
+# plot error distributions by model and horizon
+ggplot(error_df, aes(x=error)) + 
+  geom_histogram(aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=5000,
+                 colour="black", fill="white") +
+  geom_density(alpha=.2, fill="#FF6666") +
+  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+
+# plot percent error distributions by model and horizon
+ggplot(error_df, aes(x=percent_error)) + 
+  geom_histogram(aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=20,
+                 colour="black", fill="white") +
+  geom_density(alpha=.2, fill="#FF6666") +
+  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+
+# plot scaled error distributions by model and horizon
+ggplot(error_df, aes(x=scaled_error)) + 
+  geom_histogram(aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=1,
+                 colour="black", fill="white") +
+  geom_density(alpha=.2, fill="#FF6666") +
+  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+
+# plot median scaled error distributions by model and horizon
+ggplot(error_df, aes(x=med_scaled_error)) + 
+  geom_histogram(aes(y=..density..),      # Histogram with density instead of count on y-axis
+                 binwidth=3,
+                 colour="black", fill="white") +
+  geom_density(alpha=.2, fill="#FF6666") +
+  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+```
+## List keys with largest errors
+```{r}
+if (!exists('train_by_key')){
+  train_by_key <- readRDS('/home/brian/R/salesforecast/data/train_by_key')
+}
+train_by_key %>%
+  filter(!is.na(errors)) %>%
+  mutate(num_obs = map(data, num_obs),
+         min_sales = map(data, min_sales)) %>%
+  select(Primary_Key, errors, num_obs, min_sales) %>%
+  unnest(c(errors, num_obs, min_sales)) %>%
+  filter(model == 'prophet',
+         num_obs > 100) %>%
+  mutate(scaled_error = abs(error/mean_diff)) %>%
+  arrange(desc(scaled_error))
+```
+Most of large scaled errors are generated on keys with lots of missing data, suggesting prophet may be overly flexible for these series. For keys without mcuh missing data, most of the largest errors are underestimates, suggesting there may be some bias present. Many of these keys have holiday effects with large amplitude/timing differences from year-to-year, or amplitudes that vary with the overall trend. Many of the problem keys come from departments 3, 31, 80 or store 42. Some combination of choosing a multiplicative (as opposed to additive) model, adding interaction terms, a boxcox transformation, or incorporating some sort of curve registration could help on these. In general, some hyperparameter tunning is probably needed. A more adaptive model (e.g., random forest) may deal with these effects better as well. Some of the series with negative sales also appear to be potential outliers. Some of the keys (e.g., 14.19) have sudden rate changes that could potentially be addressed by adding custom changepoints.     
+
+## Final test
+```{r}
+# # create nested data frame of full training data by key
+# test_by_key <- nest_by_key(rbind(train, test))
+# 
+# # create holidays argument
+# holiday_df <- get_holiday_df(train, 
+#                              test, 
+#                              holidays = c('Christmas',
+#                                           'Thanksgiving',
+#                                           'LaborDay',
+#                                           'SuperBowl',
+#                                           'Easter'),
+#                              lower_window = -14,
+#                              upper_window = 14)
+# 
+# #cutoff date should just be last date of train
+# cutoff_date <- max(train$Date)
+# 
+# #test by key
+# num_cores <- detectCores() - 1
+# cl <- makeCluster(num_cores, type="FORK", outfile="")
+# registerDoParallel(cl)
+# test_by_key$errors <- foreach(i = 1:nrow(test_by_key)) %dopar% 
+#   ts_cv(data = test_by_key$data[[i]], 
+#         cutoff_dates = cutoff_date, 
+#         holidays = holiday_df, 
+#         fit_qgam = TRUE)
+# stopCluster(cl)
+# 
+# # gather performance metrics
+# test_by_key$metrics <- foreach(i = 1:nrow(test_by_key)) %do% 
+#     gather_metrics(error_df = test_by_key$errors[[i]])
+
+if (!exists('test_by_key')){
+  test_by_key <- readRDS('/home/brian/R/salesforecast/data/test_by_key')
+}
+
+# filter out problematic keys and compute summaries for each model, metric and horizon
+metric_df <- test_by_key %>%
+  filter(!is.na(metrics)) %>%
+  mutate(num_obs = map(data, num_obs),
+         min_sales = map(data, min_sales)) %>%
+  filter(num_obs > 50 & min_sales > 1000) %>%
+  select(Primary_Key, metrics) %>%
+  unnest(metrics) %>%
+  group_by(model, horizon, metric) %>%
+  summarise(med_value = median(value[!is.infinite(value)], na.rm = TRUE),
+            mean_value = mean(value[!is.infinite(value)], na.rm = TRUE), 
+            .groups = 'drop')
+metric_df$metric <- factor(metric_df$metric, 
+                           ordered = TRUE, 
+                           levels = c('rmse', 'mae', 'mape', 'mase', 'mamse'))
+
+#plot performace metrics
+ggplot(data = metric_df, aes(x = horizon, y = med_value, group = model, color = model)) +
+  geom_point() +
+  facet_wrap(~metric, scales = "free", nrow = 2) +
+  xlab('horizon (weeks)') +
+  theme(aspect.ratio = 1)
+```
+Perhaps unsuprisingly, QGAM and Prophet are the best performing models. Further improvements could likely be made by incorporating autoregressive terms or additional covariance structure to the extrapolated predictions. 

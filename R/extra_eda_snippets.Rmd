@@ -1,0 +1,214 @@
+---
+title: "extra eda snippets"
+output: html_notebook
+---
+
+### Cross-validate baseline models
+```{r}
+# create nested data frame of full training data by key
+num_keys <- length(unique(train$Primary_Key))
+num_dates <- length(unique(train$Date))
+train_full <- data.frame('Date' = rep(sort(unique(train$Date)), times = num_keys),
+                         'Primary_Key' = rep(unique(train$Primary_Key), each = num_dates))
+train_full <- left_join(train_full, train) %>%
+  select(Date, Weekly_Sales, Primary_Key)
+train_by_key <- train_full %>%
+  group_by(Primary_Key) %>%
+  nest
+
+# get ts object for each key
+get_ts_obj <- function(df) {
+  ts_obj <- ts(df$Weekly_Sales, 
+               freq=52, 
+               start=lubridate::year(min(df$Date))+lubridate::yday(min(df$Date))/365.25)
+}
+train_by_key <- train_by_key %>% 
+  mutate(ts_obj = map(data, get_ts_obj))
+
+# cross-validate baseline models on each key (consider parallelizing)
+train_by_key <- train_by_key %>%
+  mutate(naive_errors = map(ts_obj, tsCV, forecastfunction = naive, h = 3),
+         meanf_errors = map(ts_obj, tsCV, forecastfunction = meanf, h = 3),
+         snaive_errors = map(ts_obj, tsCV, forecastfunction = snaive, h = 3),
+         drift_errors = map(ts_obj, tsCV, forecastfunction = rwf, drift = TRUE, h = 3))
+
+# get performance metrics across horizon for each model
+get_cv_metric <- function(errors = NULL, norm_const = 1, metric = 'rmse') {
+  if (metric == 'mae'){
+    cv_metric <- colMeans(abs(errors), na.rm = T)/norm_const
+  } else if (metric == 'rmse'){
+    cv_metric <- sqrt(colMeans(errors^2, na.rm = T))/norm_const
+  } else {
+    cv_metric <- NA
+  }
+}
+
+get_metric_df <- function(data = NULL, model = NULL, metric = 'rmse', normalize = FALSE){
+  if (normalize){
+    norms <- map(data$data, function(x) mean(x$Weekly_Sales, na.rm = TRUE))
+  } else {
+    norms <- rep(1, times = nrow(data))
+  }
+  if (model == 'naive'){
+    metric_df <- map2_dfr(data$naive_errors, norms, get_cv_metric, metric = metric)
+  } else if (model == 'meanf'){
+    metric_df <- map2_dfr(data$meanf_errors, norms, get_cv_metric, metric = metric)
+  } else if (model == 'snaive'){
+    metric_df <- map2_dfr(data$snaive_errors, norms, get_cv_metric, metric = metric)
+  } else if (model == 'drift'){
+    metric_df <- map2_dfr(data$drift_errors, norms, get_cv_metric, metric = metric)
+  }
+  metric_df <-  pivot_longer(data = metric_df, 
+                                   cols = colnames(metric_df), 
+                                   names_to = 'horizon', 
+                                   values_to = 'metric') %>%
+      group_by(horizon) %>%
+      summarise(median = median(metric, na.rm = TRUE),
+                lower = quantile(metric, probs = 0.1, na.rm = TRUE),
+                upper = quantile(metric, probs = 0.9, na.rm = TRUE)) %>%
+      mutate(model = model,
+             metric = metric)
+}
+
+suppressMessages({
+  naive_rmse_df <- get_metric_df(data = train_by_key, model = 'naive', metric = 'rmse')
+  snaive_rmse_df <- get_metric_df(data = train_by_key, model = 'snaive', metric = 'rmse')
+  meanf_rmse_df <- get_metric_df(data = train_by_key, model = 'meanf', metric = 'rmse')
+  drift_rmse_df <- get_metric_df(data = train_by_key, model = 'drift', metric = 'rmse')
+  naive_mae_df <- get_metric_df(data = train_by_key, model = 'naive', metric = 'mae')
+  snaive_mae_df <- get_metric_df(data = train_by_key, model = 'snaive', metric = 'mae')
+  meanf_mae_df <- get_metric_df(data = train_by_key, model = 'meanf', metric = 'mae')
+  drift_mae_df <- get_metric_df(data = train_by_key, model = 'drift', metric = 'mae')
+  
+  naive_rmse_norm_df <- get_metric_df(data = train_by_key, model = 'naive', metric = 'rmse', normalize = TRUE) %>%
+    mutate(metric = 'normalized rmse')
+  snaive_rmse_norm_df <- get_metric_df(data = train_by_key, model = 'snaive', metric = 'rmse', normalize = TRUE) %>%
+    mutate(metric = 'normalized rmse')
+  meanf_rmse_norm_df <- get_metric_df(data = train_by_key, model = 'meanf', metric = 'rmse', normalize = TRUE) %>%
+    mutate(metric = 'normalized rmse')
+  drift_rmse_norm_df <- get_metric_df(data = train_by_key, model = 'drift', metric = 'rmse', normalize = TRUE) %>%
+    mutate(metric = 'normalized rmse')
+  naive_mae_norm_df <- get_metric_df(data = train_by_key, model = 'naive', metric = 'mae', normalize = TRUE) %>%
+    mutate(metric = 'normalized mae')
+  snaive_mae_norm_df <- get_metric_df(data = train_by_key, model = 'snaive', metric = 'mae', normalize = TRUE) %>%
+    mutate(metric = 'normalized mae')
+  meanf_mae_norm_df <- get_metric_df(data = train_by_key, model = 'meanf', metric = 'mae', normalize = TRUE) %>%
+    mutate(metric = 'normalized mae')
+  drift_mae_norm_df <- get_metric_df(data = train_by_key, model = 'drift', metric = 'mae', normalize = TRUE) %>%
+    mutate(metric = 'normalized mae')
+  
+  metric_df <- rbind(naive_rmse_df, snaive_rmse_df, meanf_rmse_df, drift_rmse_df,
+                     naive_rmse_norm_df, snaive_rmse_norm_df, meanf_rmse_norm_df, drift_rmse_norm_df,
+                     naive_mae_df, snaive_mae_df, meanf_mae_df, drift_mae_df,
+                     naive_mae_norm_df, snaive_mae_norm_df, meanf_mae_norm_df, drift_mae_norm_df)
+  metric_df$metric <- factor(metric_df$metric, ordered = TRUE, levels = c('rmse', 'mae', 'normalized rmse', 'normalized mae'))
+})
+
+#plot performance metrics across horizon by model
+ggplot(data = metric_df, 
+       aes(x = horizon, 
+           y = median,
+           group = model, 
+           color = model)
+       ) +
+  geom_point() +
+  facet_wrap(~metric, scales = "free", nrow = 2) +
+  xlab('horizon (weeks)') +
+  theme(aspect.ratio = 1)
+
+```
+For these relatively short 3 week forecasts, the seasonal naive model seems to do the worst. It may do better for longer forecasts. The drift model does okay at one step prediction, but performance quickly degrades with increasing horizon. Perhaps unsurprisingly, the naive model performs best on one step prediction, and degrades slightly less with increasing horizon. The meanf model also performs well and is more stable across horizons. It seems the best option might be to choose the naive model at short horizons (i.e., h = 1 or 2) and the meanf model at longer horizons (i.e., h = 3).
+
+### Cross-validate Prophet
+```{r}
+# create nested data frame of full training data by key
+train_by_key <- train %>%
+  group_by(Primary_Key) %>%
+  nest
+
+# create holidays argument
+num_christmas <- length(unique(train$Date[train$IsChristmas])) + length(unique(test$Date[test$IsChristmas]))
+num_thanksgiving <- length(unique(train$Date[train$IsThanksgiving])) + length(unique(test$Date[test$IsThanksgiving]))
+num_laborday <- length(unique(train$Date[train$IsLaborDay])) + length(unique(test$Date[test$IsLaborDay]))
+num_superbowl <- length(unique(train$Date[train$IsSuperBowl])) + length(unique(test$Date[test$IsSuperBowl]))
+num_easter <- length(unique(train$Date[train$IsEaster])) + length(unique(test$Date[test$IsEaster]))
+holidays <- data.frame(holiday = c(rep('Christmas',num_christmas),
+                                   rep('Thanksgiving', num_thanksgiving),
+                                   rep('LaborDay', num_laborday),
+                                   rep('SuperBowl', num_superbowl),
+                                   rep('Easter', num_easter)),
+                       ds = as.Date(c(unique(train$Date[train$IsChristmas]), unique(test$Date[test$IsChristmas]),
+                                      unique(train$Date[train$IsThanksgiving]), unique(test$Date[test$IsThanksgiving]),
+                                      unique(train$Date[train$IsLaborDay]), unique(test$Date[test$IsLaborDay]),
+                                      unique(train$Date[train$IsSuperBowl]), unique(test$Date[test$IsSuperBowl]),
+                                      unique(train$Date[train$IsEaster]), unique(test$Date[test$IsEaster]))),
+                       lower_window = -14,
+                       upper_window = 14)
+
+# get prophet object for each key
+get_prophet_obj <- function(df, holidays, growth = 'linear') {
+  pb$tick()$print()
+  if (nrow(df) > 56){
+    #prepare data
+    df <- df %>% rename(ds = Date) %>% rename(y = Weekly_Sales) 
+    prophet_obj <- prophet(growth = 'linear',
+                           yearly.seasonality = 6,
+                           weekly.seasonality = FALSE,
+                           daily.seasonality = FALSE,
+                           seasonality.mode = "additive",
+                           holidays = holidays,
+                           fit = FALSE)
+    prophet_obj <- add_seasonality(prophet_obj, name='monthly', period=30.5, fourier.order=1)
+    prophet_obj <- fit.prophet(prophet_obj, df = df)
+  } else {
+   prophet_obj <- NA 
+  }
+}
+print('fitting initial prophet models:')
+pb <- progress_estimated(nrow(train_by_key))
+suppressMessages({
+  train_by_key <- train_by_key %>% 
+    mutate(prophet_obj = map(data, get_prophet_obj, holidays = holidays, growth = 'linear'))
+})
+
+# cross-validate prophet on each key (consider parallelizing)
+prophet_cv <- function(prophet_obj, horizon = 3) {
+  pb$tick()$print()
+  num_weeks <- nrow(prophet_obj$history)
+  initial <- as.numeric(prophet_obj$history$Week[num_weeks - horizon])
+  period <- 150
+  cv <- cross_validation(prophet_obj, horizon = horizon, period = period, units = 'weeks')
+}
+print('cross-validating prophet models:')
+pb <- progress_estimated(sum(!is.na(train_by_key$prophet_obj)))
+suppressMessages({
+  prophet_by_key <- train_by_key %>%
+    filter(!is.na(prophet_obj)) %>%
+    mutate(prophet_cv = map(prophet_obj, prophet_cv)) %>%
+    mutate(prophet_metrics = map(prophet_cv, performance_metrics, rolling_window = 0))
+})
+
+# gather performance metrics
+metric_df <- prophet_by_key %>% 
+  select(Primary_Key, prophet_metrics) %>%
+  unnest(prophet_metrics) %>%
+  group_by(horizon) %>%
+  summarise(rmse = sqrt(mean(rmse^2, na.rm = TRUE)),
+            mae = mean(mae, na.rm = TRUE),
+            mape = mean(mape, na.rm = TRUE),
+            coverage = mean(coverage, na.rm = TRUE),
+            .groups = 'drop') %>%
+  pivot_longer(cols = c('rmse', 'mae', 'mape', 'coverage'), 
+               names_to = 'metric', 
+               values_to = 'value') %>%
+  mutate(horizon = as.numeric(horizon)/7)
+
+#plot performace metrics
+ggplot(data = metric_df, aes(x = horizon, y = value)) +
+  geom_point() +
+  facet_wrap(~metric, scales = "free", nrow = 2) +
+  xlab('horizon (weeks)') +
+  theme(aspect.ratio = 1)
+```
+
+
