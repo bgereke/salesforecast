@@ -89,7 +89,7 @@ ggplot(data = train,
 It's still messy, but we can now tell there are some negative sales in the data (w/lambda = 0.3, anything less than -3.3 is negative in the original scale). This has implications for forecast performance metrics like MAPE which can't be computed on small/negative observations. We can break things down further by store and/or department to get a sense of how sales vary across these factors.
 
 ### Sales over time by store
-```{r}
+```{r, fig.width = 10, fig.height = 8}
 ggplot(data = train, 
        aes(x = Date, 
            y = Weekly_Sales_boxcox, 
@@ -119,7 +119,7 @@ ggplot(data = train,
 Here we can see there's a mixture of sales patterns, and vertical offsets, across departments within each store. Some stores appear to lack the big "spiky" yearly seasonal pattern; although, this could be by chance. The dispersion of mean sells across departments apears to be somewhat similar from store to store.
 
 ### Sales over time by department
-```{r}
+```{r, fig.width = 15, fig.height = 10}
 ggplot(data = train, 
        aes(x = Date, 
            y = Weekly_Sales_boxcox, 
@@ -373,8 +373,8 @@ plot(qgam_model, pages = 1, scale = 0, scheme = 1, rug = FALSE, all.terms = TRUE
 # train_by_key <- nest_by_key(train)
 # 
 # # create holidays argument
-# holiday_df <- get_holiday_df(train, 
-#                              test, 
+# holiday_df <- get_holiday_df(train,
+#                              test,
 #                              holidays = c('Christmas',
 #                                           'Thanksgiving',
 #                                           'LaborDay',
@@ -388,20 +388,23 @@ plot(qgam_model, pages = 1, scale = 0, scheme = 1, rug = FALSE, all.terms = TRUE
 # cutoff_dates <- as.Date(c("2012-09-14")) - 21*seq(0, num_dates - 1)
 # 
 # #cross-validate by key in parallel
-# num_cores <- detectCores() - 1  
-# cl <- makeCluster(num_cores, type="FORK", outfile="")  
-# registerDoParallel(cl)  
-# train_by_key$errors <- foreach(i = 1:nrow(train_by_key)) %dopar% 
-#   ts_cv(data = train_by_key$data[[i]], cutoff_dates = cutoff_dates, holidays = holiday_df)
+# num_cores <- detectCores() - 1
+# cl <- makeCluster(num_cores, type="FORK", outfile="")
+# registerDoParallel(cl)
+# train_by_key$errors <- foreach(i = 1:nrow(train_by_key)) %dopar%
+#   ts_cv(data = train_by_key$data[[i]], 
+#         cutoff_dates = cutoff_dates, 
+#         holidays = holiday_df,
+#         fit_qgam = TRUE)
 # stopCluster(cl)
 # 
 # # gather performance metrics
-# train_by_key$metrics <- foreach(i = 1:nrow(train_by_key)) %do% 
+# train_by_key$metrics <- foreach(i = 1:nrow(train_by_key)) %do%
 #     gather_metrics(error_df = train_by_key$errors[[i]])
 
 #start here to avoid retraining above
 if (!exists('train_by_key')){
-  train_by_key <- readRDS('/home/brian/R/salesforecast/data/train_by_key')
+  train_by_key <- readRDS('/home/brian/R/salesforecast/data/train_by_key_qgam')
 }
 
 # filter out problematic keys and compute summaries for each model, metric and horizon
@@ -449,7 +452,7 @@ ggplot(error_df, aes(x=error)) +
                  binwidth=5000,
                  colour="black", fill="white") +
   geom_density(alpha=.2, fill="#FF6666") +
-  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+  facet_wrap(model~horizon, scales = 'free', nrow = 5)
 
 # plot percent error distributions by model and horizon
 ggplot(error_df, aes(x=percent_error)) + 
@@ -457,7 +460,7 @@ ggplot(error_df, aes(x=percent_error)) +
                  binwidth=20,
                  colour="black", fill="white") +
   geom_density(alpha=.2, fill="#FF6666") +
-  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+  facet_wrap(model~horizon, scales = 'free', nrow = 5)
 
 # plot scaled error distributions by model and horizon
 ggplot(error_df, aes(x=scaled_error)) + 
@@ -465,7 +468,7 @@ ggplot(error_df, aes(x=scaled_error)) +
                  binwidth=1,
                  colour="black", fill="white") +
   geom_density(alpha=.2, fill="#FF6666") +
-  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+  facet_wrap(model~horizon, scales = 'free', nrow = 5)
 
 # plot median scaled error distributions by model and horizon
 ggplot(error_df, aes(x=med_scaled_error)) + 
@@ -473,7 +476,7 @@ ggplot(error_df, aes(x=med_scaled_error)) +
                  binwidth=3,
                  colour="black", fill="white") +
   geom_density(alpha=.2, fill="#FF6666") +
-  facet_wrap(model~horizon, scales = 'free', nrow = 4)
+  facet_wrap(model~horizon, scales = 'free', nrow = 5)
 ```
 ## List keys with largest errors
 ```{r}

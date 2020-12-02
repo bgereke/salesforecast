@@ -178,7 +178,8 @@ nest_by_key <- function(multi_key_df, add_na = TRUE){
     select(Date, Weekly_Sales, Primary_Key,
            DaysFromStart, DayYearNormalized, DayMonthNormalized,
            TwoWeeksBeforeEaster, OneWeekBeforeEaster, WeekOfEaster,
-           OneWeekAfterEaster, TwoWeeksAfterEaster)
+           OneWeekAfterEaster, TwoWeeksAfterEaster, TwoWeeksBeforeThanksgiving,
+           OneWeekBeforeThanksgiving, WeekOfThanksgiving)
   if (add_na){
     num_keys <- length(unique(multi_key_df$Primary_Key))
     num_dates <- length(unique(multi_key_df$Date))
@@ -296,6 +297,9 @@ get_holiday_df <- function(train, test, holidays, lower_window = 0, upper_window
 #' last date in the training data. The model column gives
 #' the name of the model that made each prediction.
 ts_cv <- function(data, cutoff_dates, holidays, fit_qgam = FALSE) {
+  if (sum(!is.na(data$Weekly_Sales)) < 100){
+    return(NA)
+  }
   tryCatch(
     {
       #rename cols
