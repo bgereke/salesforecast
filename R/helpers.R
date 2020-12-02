@@ -174,12 +174,6 @@ get_key_df <- function(multi_key_df, key, add_na = TRUE){
 #' head(nested_df)
 #' head(nested_df_na)
 nest_by_key <- function(multi_key_df, add_na = TRUE){
-  multi_key_df <- multi_key_df %>%
-    select(Date, Weekly_Sales, Primary_Key,
-           DaysFromStart, DayYearNormalized, DayMonthNormalized,
-           TwoWeeksBeforeEaster, OneWeekBeforeEaster, WeekOfEaster,
-           OneWeekAfterEaster, TwoWeeksAfterEaster, TwoWeeksBeforeThanksgiving,
-           OneWeekBeforeThanksgiving, WeekOfThanksgiving)
   if (add_na){
     num_keys <- length(unique(multi_key_df$Primary_Key))
     num_dates <- length(unique(multi_key_df$Date))

@@ -13,7 +13,8 @@ suppressMessages({
   library(prophet)
   library(qgam)
   library(doParallel)
-  source('/home/brian/R/salesforecast/R/helpers.R')
+  devtools::load_all()
+  # source('/home/brian/R/salesforecast/R/helpers.R')
   })
 ```
 
